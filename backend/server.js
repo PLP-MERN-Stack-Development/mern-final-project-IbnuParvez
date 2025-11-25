@@ -3,30 +3,74 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { createServer } = require('http');
+const { Server } = require('socket.io');
 
 const dbManager = require('./config/db'); // Your path
 const logger = require('./utils/logger');
 
 const hospitalRoutes = require('./routes/hospitalRoutes');
 const patientRoutes = require('./routes/patientRoutes');
+const doctorRoutes = require('./routes/doctorRoutes');
 const transferRoutes = require('./routes/transferRoutes');
 const queryRoutes = require('./routes/queryRoutes');
 
 const app = express();
+const server = createServer(app);
 const PORT = process.env.PORT || 5000;
+
+// Socket.IO setup
+const io = new Server(server, {
+  cors: {
+    origin: process.env.ALLOWED_ORIGINS
+      ? process.env.ALLOWED_ORIGINS.split(',')
+      : ['http://localhost:3000', 'http://localhost:5173'],
+    credentials: true,
+  },
+});
+
+// Socket connection handling
+io.on('connection', (socket) => {
+  logger.info(`User connected: ${socket.id}`);
+
+  socket.on('join-hospital', (hospitalId) => {
+    socket.join(`hospital-${hospitalId}`);
+    logger.info(`User ${socket.id} joined hospital-${hospitalId}`);
+  });
+
+  socket.on('leave-hospital', (hospitalId) => {
+    socket.leave(`hospital-${hospitalId}`);
+    logger.info(`User ${socket.id} left hospital-${hospitalId}`);
+  });
+
+  socket.on('disconnect', () => {
+    logger.info(`User disconnected: ${socket.id}`);
+  });
+});
+
+// Make io available in routes
+app.set('io', io);
 
 // ===== MIDDLEWARE =====
 // Security
 app.use(helmet());
 
 // CORS
-const allowedOrigins = process.env.ALLOWED_ORIGINS 
+const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',')
   : ['http://localhost:3000', 'http://localhost:5173'];
 
 app.use(cors({
   origin: allowedOrigins,
   credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
+// Handle preflight requests
+app.options('*', cors({
+  origin: allowedOrigins,
+  credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
 // Body parser
@@ -36,10 +80,10 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // Rate limiting
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // Increased for development
   message: 'Too many requests from this IP, please try again later.',
 });
-app.use('/api', limiter);
+// app.use('/api', limiter); // Disabled for development
 
 // Request logging
 app.use((req, res, next) => {
@@ -86,6 +130,7 @@ app.get('/api/health', async (req, res) => {
 // API routes
 app.use('/api/hospitals', hospitalRoutes);
 app.use('/api/patients', patientRoutes);
+app.use('/api/doctors', doctorRoutes);
 app.use('/api/transfer', transferRoutes);
 // app.use('/api/query', queryRoutes); // Commented out due to empty queryRoutes.js
 
@@ -154,7 +199,30 @@ process.on('unhandledRejection', (reason, promise) => {
   process.exit(1);
 });
 
+// ===== SERVER STARTUP =====
+async function startServer() {
+  try {
+    // Initialize database connections
+    logger.info('Initializing database connections...');
+    await dbManager.initializeConnections();
+
+    // Start HTTP server with Socket.IO
+    server.listen(PORT, () => {
+      logger.info(`🚀 CareBridge API server running on port ${PORT}`);
+      logger.info(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
+      logger.info(`🏥 Connected hospitals: ${dbManager.getAllHospitals().length}`);
+      logger.info(`🔗 API Base URL: http://localhost:${PORT}/api`);
+      logger.info(`🔌 Socket.IO enabled on port ${PORT}`);
+    });
+  } catch (error) {
+    logger.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
 // Start the server
 startServer();
+
+// Trigger nodemon restart
 
 module.exports = app;
